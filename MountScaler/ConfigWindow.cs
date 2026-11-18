@@ -66,7 +66,9 @@ public sealed class ConfigWindow : Window
             return;
         }
 
-        ImGui.TextUnformatted($"Race {d.Race}, clan {d.Tribe}, {(d.Sex == 0 ? "male" : "female")}, height slider {d.Slider}%");
+        ImGui.TextUnformatted($"Look: race {d.Race}, clan {d.Tribe}, {(d.Sex == 0 ? "male" : "female")}, height slider {d.Slider}%{(d.LookFromModel ? "" : " (character data)")}");
+        if (d.BaseRace != d.Race || d.BaseSex != d.Sex)
+            ImGui.TextUnformatted($"Character underneath: race {d.BaseRace}, {(d.BaseSex == 0 ? "male" : "female")} (Glamourer)");
         if (d.HeightPerCalculate <= 0)
         {
             ImGui.TextColored(new Vector4(1f, 0.5f, 0.3f, 1f), "Not scaling right now (disabled, or measuring your height).");

@@ -14,7 +14,9 @@ public struct DebugState
     public bool Pillion;
     public bool HasMount;
     public uint MountId;
-    public byte Race, Tribe, Sex, Slider;
+    public byte Race, Tribe, Sex, Slider; // as rendered
+    public bool LookFromModel;            // read from the rendered model (vs the character's own data)
+    public byte BaseRace, BaseSex;        // the character's own data, for comparison
     public float Height;          // rider skeleton scale: rendered height multiplier incl. Penumbra racial scaling
     public float CalculateHeight; // ModelContainer.CalculateHeight (height x ~1.75)
     public float HeightPerCalculate; // calibration taken while unmounted
@@ -195,7 +197,7 @@ public sealed unsafe class MountScaling : IDisposable
         if (mountDraw == summonDraw && ScaleOverride.NearlyEqual(scale, summonScale))
             return;
 
-        var c = player->DrawData.CustomizeData;
+        var c = GetLook(player, out _);
         summonDraw = mountDraw;
         summonScale = scale;
         summonRaceScale = MountSizes.RaceScale(player->Mount.MountId, c.Race, c.Tribe, c.Sex);
@@ -211,7 +213,11 @@ public sealed unsafe class MountScaling : IDisposable
     /// </summary>
     private float? ReadHeightRatio(Character* player, Vector3 riderScale)
     {
-        var customize = player->DrawData.CustomizeData;
+        var customize = GetLook(player, out var fromModel);
+        var baseCustomize = player->DrawData.CustomizeData;
+        Debug.LookFromModel = fromModel;
+        Debug.BaseRace = baseCustomize.Race;
+        Debug.BaseSex = baseCustomize.Sex;
         Debug.Race = customize.Race;
         Debug.Tribe = customize.Tribe;
         Debug.Sex = customize.Sex;
@@ -278,6 +284,26 @@ public sealed unsafe class MountScaling : IDisposable
 
         heightPerCalculate = skeleton / model / calculate;
         calibratedFor = playerDraw;
+    }
+
+    /// <summary>
+    /// Race, clan, gender and height as rendered. Glamourer changes the rendered model's copy
+    /// and leaves the character's own data alone, and the game sizes mounts from the
+    /// rendered one, so prefer it.
+    /// </summary>
+    private static CustomizeData GetLook(Character* player, out bool fromModel)
+    {
+        var draw = player->DrawObject;
+        if (draw != null
+            && draw->GetObjectType() == ObjectType.CharacterBase
+            && ((CharacterBase*)draw)->GetModelType() == CharacterBase.ModelType.Human)
+        {
+            fromModel = true;
+            return ((Human*)draw)->Customize;
+        }
+
+        fromModel = false;
+        return player->DrawData.CustomizeData;
     }
 
     private static Vector3 SkeletonScale(DrawObject* draw)
