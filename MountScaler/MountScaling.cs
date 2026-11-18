@@ -34,11 +34,14 @@ public struct DebugState
     public Vector3 RiderApplied;
     public Vector3 RiderSkeletonScale;
     public Vector3 MountSkeletonScale;
-    public float SeatHeight;       // rider model height above your position
-    public float CameraLiftTarget; // how far the seat rose because of our scaling
+    public float AimHeight;        // your CameraOffset.Y: the game's vanilla aim height
+    public bool FirstPerson;
+    public float CameraLiftTarget; // aim height x (factor - 1)
     public float CameraLift;       // eased value currently added
-    public Vector3 CameraOffset;
-    public Vector3 CameraOffsetTarget;
+    public bool CameraFound;
+    public float LookAtHeight;     // world camera look-at height (0x234) after our write
+    public float LookAtHeightBase; // what the game/Cammy had there
+    public float InterpolatedLookAtHeight; // 0x240, what the camera is gliding through
 }
 
 /// <summary>
@@ -88,35 +91,37 @@ internal unsafe struct ScaleOverride
 }
 
 /// <summary>
-/// Our lift on the player's camera aim point (GameObject.CameraOffsetTarget, which the game
-/// eases CameraOffset toward). Added on top of whatever value the game or another plugin set,
-/// so it can be undone. The pointer is only compared, never dereferenced on its own.
+/// Our lift on the world camera's look-at height. Added on top of whatever value the game or
+/// another plugin (Cammy) set, so it can be undone. The pointer is only compared, never
+/// dereferenced on its own.
 /// </summary>
 internal unsafe struct CameraOverride
 {
-    private Character* target;
-    private Vector3 baseValue;
-    private Vector3 lastWritten;
+    private float* target;
+    private float baseValue;
+    private float lastWritten;
 
-    public void Apply(Character* player, float lift)
+    public float Base => baseValue;
+
+    public void Apply(float* field, float lift)
     {
-        var current = player->CameraOffsetTarget;
-        if (player != target || !ScaleOverride.NearlyEqual(current, lastWritten))
+        var current = *field;
+        if (field != target || MathF.Abs(current - lastWritten) > 1e-5f)
         {
             // First write, or someone else changed it since our last write: that's the new base.
-            target = player;
+            target = field;
             baseValue = current;
         }
 
-        var value = baseValue + new Vector3(0f, lift, 0f);
-        player->CameraOffsetTarget = value;
+        var value = baseValue + lift;
+        *field = value;
         lastWritten = value;
     }
 
-    public void Restore(Character* player)
+    public void Restore(float* field)
     {
-        if (target != null && player == target && ScaleOverride.NearlyEqual(player->CameraOffsetTarget, lastWritten))
-            player->CameraOffsetTarget = baseValue;
+        if (target != null && field == target && MathF.Abs(*field - lastWritten) <= 1e-5f)
+            *field = baseValue;
         target = null;
     }
 
@@ -182,7 +187,7 @@ public sealed unsafe class MountScaling : IDisposable
         {
             mount.Forget();
             rider.Forget();
-            camera.Forget();
+            RestoreCamera(); // the camera outlives the player object (zoning)
             return;
         }
 
@@ -241,42 +246,77 @@ public sealed unsafe class MountScaling : IDisposable
         return factor;
     }
 
+    // World camera fields, from Cammy's GameCamera layout (not in ClientStructs yet; checked
+    // working with Cammy on this patch 2026-11). 0x240 is the eased copy the game glides toward 0x234.
+    private const int CameraModeOffset = 0x180;            // 0 = first person
+    private const int CameraLookAtHeightOffset = 0x234;
+    private const int CameraInterpolatedLookAtHeightOffset = 0x240;
+
     /// <summary>
-    /// Raises (or lowers) the camera's aim point by exactly how far the mount's scaling moved
-    /// your seat, so the camera keeps aiming at the same spot on you as in vanilla. Added on
-    /// top of whatever the game or Cammy set, and eased in and out. Zoom is left alone.
+    /// Scales the camera's aim height with the mount: the game aims at your character's
+    /// CameraOffset height (e.g. 1.50 on a vanilla mount), so we add that × (factor − 1) to the
+    /// world camera's look-at height, on top of whatever the game or Cammy set, eased in and out.
+    /// Zoom is left alone, and nothing changes in first person.
     /// </summary>
+    /// <summary>The world camera's look-at height field, or null if there's no camera or it looks wrong.</summary>
+    private static float* GetLookAtField(out byte* cam)
+    {
+        var manager = FFXIVClientStructs.FFXIV.Client.Game.Control.CameraManager.Instance();
+        cam = manager != null ? (byte*)manager->Camera : null;
+        if (cam == null)
+            return null;
+
+        var field = (float*)(cam + CameraLookAtHeightOffset);
+        // Layout changed under us after a patch: don't touch it.
+        return float.IsFinite(*field) && MathF.Abs(*field) < 1000f ? field : null;
+    }
+
+    private void RestoreCamera()
+    {
+        cameraLift = 0f;
+        var field = GetLookAtField(out _);
+        if (field != null)
+            camera.Restore(field);
+        else
+            camera.Forget();
+    }
+
     private void UpdateCamera(Character* player, float? factor, float dt)
     {
-        var desired = 0f;
-        var seat = 0f;
-        var playerDraw = player->DrawObject;
-        if (config.MoveCamera && factor is { } f && f > 0.001f && playerDraw != null)
-        {
-            // The rider model sits on the seat; its height above your position is the seat
-            // height now, which is the vanilla seat height times the factor.
-            seat = playerDraw->Position.Y - player->Position.Y;
-            if (float.IsFinite(seat) && seat > 0f)
-                desired = seat * (1f - 1f / f);
-        }
+        var field = GetLookAtField(out var cam);
+        var firstPerson = cam != null && *(int*)(cam + CameraModeOffset) == 0;
 
-        // Glide: close ~95% of the gap in about a third of a second.
+        var aimHeight = player->CameraOffset.Y;
+        var desired = 0f;
+        if (config.MoveCamera && field != null && !firstPerson && factor is { } f && IsSane(f) && float.IsFinite(aimHeight))
+            desired = aimHeight * (f - 1f);
+
+        // Glide: close ~95% of the gap in about a third of a second (the game eases on top).
         var k = 1f - MathF.Exp(-Math.Max(dt, 0f) / CameraEaseSeconds);
         cameraLift += (desired - cameraLift) * k;
         if (desired == 0f && MathF.Abs(cameraLift) < 0.001f)
             cameraLift = 0f;
 
-        Debug.SeatHeight = seat;
+        Debug.AimHeight = aimHeight;
+        Debug.FirstPerson = firstPerson;
         Debug.CameraLift = cameraLift;
         Debug.CameraLiftTarget = desired;
 
-        if (cameraLift == 0f)
-            camera.Restore(player);
-        else
-            camera.Apply(player, cameraLift);
+        if (field == null)
+        {
+            camera.Forget();
+            return;
+        }
 
-        Debug.CameraOffset = player->CameraOffset;
-        Debug.CameraOffsetTarget = player->CameraOffsetTarget;
+        if (cameraLift == 0f)
+            camera.Restore(field);
+        else
+            camera.Apply(field, cameraLift);
+
+        Debug.CameraFound = true;
+        Debug.LookAtHeight = *field;
+        Debug.LookAtHeightBase = camera.Base;
+        Debug.InterpolatedLookAtHeight = *(float*)(cam + CameraInterpolatedLookAtHeightOffset);
     }
 
     /// <summary>
@@ -411,8 +451,7 @@ public sealed unsafe class MountScaling : IDisposable
         var player = GetPlayer();
         mount.Restore(player != null ? GetOwnMountDrawObject(player) : null);
         rider.Restore(player != null ? player->DrawObject : null);
-        if (player != null)
-            camera.Restore(player);
+        RestoreCamera();
     }
 
     private static Character* GetPlayer()

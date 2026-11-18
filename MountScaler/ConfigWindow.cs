@@ -92,9 +92,11 @@ public sealed class ConfigWindow : Window
         ImGui.TextUnformatted($"Rider skeleton scale: {Fmt(d.RiderSkeletonScale)}");
         ImGui.TextUnformatted($"Mount skeleton scale: {Fmt(d.MountSkeletonScale)}");
         ImGui.Separator();
-        ImGui.TextUnformatted($"Seat height: {d.SeatHeight:F3}   Camera lift: {d.CameraLift:F3} (target {d.CameraLiftTarget:F3})");
-        ImGui.TextUnformatted($"Camera offset: {Fmt(d.CameraOffset)}");
-        ImGui.TextUnformatted($"Camera offset target: {Fmt(d.CameraOffsetTarget)}");
+        ImGui.TextUnformatted($"Vanilla aim height: {d.AimHeight:F3}   Camera lift: {d.CameraLift:F3} (target {d.CameraLiftTarget:F3}){(d.FirstPerson ? "  [first person]" : "")}");
+        if (d.CameraFound)
+            ImGui.TextUnformatted($"Camera look-at height: {d.LookAtHeightBase:F3} -> {d.LookAtHeight:F3} (gliding: {d.InterpolatedLookAtHeight:F3})");
+        else
+            ImGui.TextUnformatted("Camera look-at height: not found");
     }
 
     private static void Hint(string text)
