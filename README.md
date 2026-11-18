@@ -24,5 +24,6 @@ Type `/mountscale` to open the settings.
 
 - **Strength**: 0% leaves mounts vanilla, 100% follows your height change fully.
 - **Keep rider at normal size**: you're attached to the mount and would otherwise grow and shrink with it.
+- **Move camera with mount height** (off by default): aims the camera higher or lower as your seat moves with the mount's size, gliding when you mount and dismount. Zoom is left alone.
 - **Include Customize+ / Brio scale**: also follow extra model scale from those plugins.
 - **Debug**: shows your height, the vanilla height for your character and the scale being applied.

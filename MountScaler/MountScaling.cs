@@ -34,6 +34,11 @@ public struct DebugState
     public Vector3 RiderApplied;
     public Vector3 RiderSkeletonScale;
     public Vector3 MountSkeletonScale;
+    public float SeatHeight;       // rider model height above your position
+    public float CameraLiftTarget; // how far the seat rose because of our scaling
+    public float CameraLift;       // eased value currently added
+    public Vector3 CameraOffset;
+    public Vector3 CameraOffsetTarget;
 }
 
 /// <summary>
@@ -83,6 +88,42 @@ internal unsafe struct ScaleOverride
 }
 
 /// <summary>
+/// Our lift on the player's camera aim point (GameObject.CameraOffsetTarget, which the game
+/// eases CameraOffset toward). Added on top of whatever value the game or another plugin set,
+/// so it can be undone. The pointer is only compared, never dereferenced on its own.
+/// </summary>
+internal unsafe struct CameraOverride
+{
+    private Character* target;
+    private Vector3 baseValue;
+    private Vector3 lastWritten;
+
+    public void Apply(Character* player, float lift)
+    {
+        var current = player->CameraOffsetTarget;
+        if (player != target || !ScaleOverride.NearlyEqual(current, lastWritten))
+        {
+            // First write, or someone else changed it since our last write: that's the new base.
+            target = player;
+            baseValue = current;
+        }
+
+        var value = baseValue + new Vector3(0f, lift, 0f);
+        player->CameraOffsetTarget = value;
+        lastWritten = value;
+    }
+
+    public void Restore(Character* player)
+    {
+        if (target != null && player == target && ScaleOverride.NearlyEqual(player->CameraOffsetTarget, lastWritten))
+            player->CameraOffsetTarget = baseValue;
+        target = null;
+    }
+
+    public void Forget() => target = null;
+}
+
+/// <summary>
 /// Scales the local player's own mount by how much their height differs from vanilla,
 /// keeping the rider at their normal size. Race and the vanilla height slider are
 /// already handled by the game.
@@ -93,6 +134,10 @@ public sealed unsafe class MountScaling : IDisposable
 
     private ScaleOverride mount;
     private ScaleOverride rider;
+    private CameraOverride camera;
+
+    private const float CameraEaseSeconds = 0.1f;
+    private float cameraLift;
 
     // The skeleton scale is the rendered height, but it also picks up the rider scale we
     // write (a frame late), so reading it while we're compensating loops. Instead we learn
@@ -137,9 +182,17 @@ public sealed unsafe class MountScaling : IDisposable
         {
             mount.Forget();
             rider.Forget();
+            camera.Forget();
             return;
         }
 
+        var factor = UpdateScaling(player);
+        UpdateCamera(player, factor, (float)framework.UpdateDelta.TotalSeconds);
+    }
+
+    /// <summary>Scales the mount (and compensates the rider). Returns the factor applied, or null if not scaling.</summary>
+    private float? UpdateScaling(Character* player)
+    {
         var playerDraw = player->DrawObject;
         Calibrate(player, playerDraw);
 
@@ -159,7 +212,7 @@ public sealed unsafe class MountScaling : IDisposable
             rider.Restore(playerDraw);
             if (mountDraw == null)
                 summonDraw = null; // next mount is a new summon
-            return;
+            return null;
         }
 
         // Read the rider's own scale before we compensate it, so our write never feeds back in.
@@ -169,7 +222,7 @@ public sealed unsafe class MountScaling : IDisposable
 
         var ratio = ReadHeightRatio(player, rider.Original);
         if (ratio is not { } r)
-            return;
+            return null;
 
         var factor = ComputeFactor(r);
         Debug.Factor = factor;
@@ -185,6 +238,45 @@ public sealed unsafe class MountScaling : IDisposable
         Debug.RiderApplied = rider.LastApplied;
         Debug.RiderSkeletonScale = SkeletonScale(playerDraw);
         Debug.MountSkeletonScale = SkeletonScale(mountDraw);
+        return factor;
+    }
+
+    /// <summary>
+    /// Raises (or lowers) the camera's aim point by exactly how far the mount's scaling moved
+    /// your seat, so the camera keeps aiming at the same spot on you as in vanilla. Added on
+    /// top of whatever the game or Cammy set, and eased in and out. Zoom is left alone.
+    /// </summary>
+    private void UpdateCamera(Character* player, float? factor, float dt)
+    {
+        var desired = 0f;
+        var seat = 0f;
+        var playerDraw = player->DrawObject;
+        if (config.MoveCamera && factor is { } f && f > 0.001f && playerDraw != null)
+        {
+            // The rider model sits on the seat; its height above your position is the seat
+            // height now, which is the vanilla seat height times the factor.
+            seat = playerDraw->Position.Y - player->Position.Y;
+            if (float.IsFinite(seat) && seat > 0f)
+                desired = seat * (1f - 1f / f);
+        }
+
+        // Glide: close ~95% of the gap in about a third of a second.
+        var k = 1f - MathF.Exp(-Math.Max(dt, 0f) / CameraEaseSeconds);
+        cameraLift += (desired - cameraLift) * k;
+        if (desired == 0f && MathF.Abs(cameraLift) < 0.001f)
+            cameraLift = 0f;
+
+        Debug.SeatHeight = seat;
+        Debug.CameraLift = cameraLift;
+        Debug.CameraLiftTarget = desired;
+
+        if (cameraLift == 0f)
+            camera.Restore(player);
+        else
+            camera.Apply(player, cameraLift);
+
+        Debug.CameraOffset = player->CameraOffset;
+        Debug.CameraOffsetTarget = player->CameraOffsetTarget;
     }
 
     /// <summary>
@@ -319,6 +411,8 @@ public sealed unsafe class MountScaling : IDisposable
         var player = GetPlayer();
         mount.Restore(player != null ? GetOwnMountDrawObject(player) : null);
         rider.Restore(player != null ? player->DrawObject : null);
+        if (player != null)
+            camera.Restore(player);
     }
 
     private static Character* GetPlayer()

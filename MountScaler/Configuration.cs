@@ -19,5 +19,8 @@ public class Configuration : IPluginConfiguration
     /// <summary>Cancel out the mount's scale on the rider, who inherits it through the seat attachment.</summary>
     public bool KeepRiderSize = true;
 
+    /// <summary>Raise/lower the camera's aim point by how far the scaled mount moved your seat.</summary>
+    public bool MoveCamera = false;
+
     public void Save() => Plugin.PluginInterface.SavePluginConfig(this);
 }

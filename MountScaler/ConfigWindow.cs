@@ -34,6 +34,9 @@ public sealed class ConfigWindow : Window
         changed |= ImGui.Checkbox("Keep rider at normal size", ref config.KeepRiderSize);
         Hint("You sit on the mount and would otherwise grow and shrink with it.");
 
+        changed |= ImGui.Checkbox("Move camera with mount height", ref config.MoveCamera);
+        Hint("Aims the camera higher or lower as your seat moves. Zoom is left alone.");
+
         changed |= ImGui.Checkbox("Include Customize+ / Brio scale", ref config.IncludeModelScale);
 
         if (!VanillaBaseline.Loaded)
@@ -88,6 +91,10 @@ public sealed class ConfigWindow : Window
         ImGui.TextUnformatted($"Rider scale: {Fmt(d.RiderOriginal)} -> {Fmt(d.RiderApplied)}");
         ImGui.TextUnformatted($"Rider skeleton scale: {Fmt(d.RiderSkeletonScale)}");
         ImGui.TextUnformatted($"Mount skeleton scale: {Fmt(d.MountSkeletonScale)}");
+        ImGui.Separator();
+        ImGui.TextUnformatted($"Seat height: {d.SeatHeight:F3}   Camera lift: {d.CameraLift:F3} (target {d.CameraLiftTarget:F3})");
+        ImGui.TextUnformatted($"Camera offset: {Fmt(d.CameraOffset)}");
+        ImGui.TextUnformatted($"Camera offset target: {Fmt(d.CameraOffsetTarget)}");
     }
 
     private static void Hint(string text)
