@@ -74,13 +74,14 @@ public sealed class ConfigWindow : Window
         }
         ImGui.TextUnformatted($"Your height: {d.Height:F4}");
         ImGui.TextUnformatted($"CalculateHeight: {d.CalculateHeight:F4} (x {d.HeightPerCalculate:F4})");
-        ImGui.TextUnformatted($"Vanilla height for you: {d.VanillaHeight:F4}");
+        ImGui.TextUnformatted($"Average height for your look (50%): {d.VanillaHeight:F4}");
         ImGui.TextUnformatted($"Model scale Y: {d.ModelScaleY:F4}");
-        ImGui.TextUnformatted($"Ratio: {d.Ratio:F4}   Factor: {d.Factor:F3}x");
+        ImGui.TextUnformatted($"Height ratio: {d.HeightRatio:F4}");
         ImGui.Separator();
         ImGui.TextUnformatted($"Mount id: {d.MountId}");
-        if (d.MountRaceScale is { } rs)
-            ImGui.TextUnformatted($"Game's race size for this mount: {rs:F2} (x vanilla height = {rs * d.VanillaHeight:F3})");
+        ImGui.TextUnformatted($"Mount race size when summoned: {Opt(d.SummonRaceScale)}, for your look now: {Opt(d.VisualRaceScale)}");
+        ImGui.TextUnformatted($"Race adjust: {d.RaceAdjust:F4}");
+        ImGui.TextUnformatted($"Ratio: {d.Ratio:F4}   Factor: {d.Factor:F3}x");
         ImGui.TextUnformatted($"Mount scale: {Fmt(d.MountOriginal)} -> {Fmt(d.MountApplied)}");
         ImGui.TextUnformatted($"Rider scale: {Fmt(d.RiderOriginal)} -> {Fmt(d.RiderApplied)}");
         ImGui.TextUnformatted($"Rider skeleton scale: {Fmt(d.RiderSkeletonScale)}");
@@ -93,6 +94,8 @@ public sealed class ConfigWindow : Window
         ImGui.TextUnformatted(text);
         ImGui.PopStyleColor();
     }
+
+    private static string Opt(float? v) => v is { } x ? x.ToString("F2") : "n/a";
 
     private static string Fmt(Vector3 v) => $"({v.X:F3}, {v.Y:F3}, {v.Z:F3})";
 }

@@ -18,11 +18,14 @@ public struct DebugState
     public float Height;          // rider skeleton scale: rendered height multiplier incl. Penumbra racial scaling
     public float CalculateHeight; // ModelContainer.CalculateHeight (height x ~1.75)
     public float HeightPerCalculate; // calibration taken while unmounted
-    public float VanillaHeight;   // same clan/sex/slider from the unmodded table (what the game sizes the mount for)
+    public float VanillaHeight;   // average (50% slider) member of your current clan and gender, unmodded
     public float ModelScaleY;     // rider draw object Scale.Y before our compensation (Customize+ / Brio)
-    public float Ratio;           // how much bigger/smaller than vanilla you are
-    public float Factor;          // after strength and clamps
-    public float? MountRaceScale; // MountCustomize for this mount, race and sex
+    public float HeightRatio;     // your height / VanillaHeight (x model scale)
+    public float? SummonRaceScale; // MountCustomize value the game used when the mount appeared
+    public float? VisualRaceScale; // MountCustomize value for how you look now
+    public float RaceAdjust;      // Visual / Summon
+    public float Ratio;           // RaceAdjust x HeightRatio
+    public float Factor;          // after strength
     public Vector3 MountOriginal;
     public Vector3 MountApplied;
     public Vector3 RiderOriginal;
@@ -41,20 +44,20 @@ internal unsafe struct ScaleOverride
     public Vector3 Original;
     public Vector3 LastApplied;
 
-    /// <summary>Picks up the draw object's own scale: on first sight, or if something else changed it since our last write.</summary>
-    public void Sync(DrawObject* current)
+    /// <summary>
+    /// Picks up the draw object's own scale: on first sight, or if something else changed it
+    /// since our last write. Returns true when <see cref="Original"/> was (re)captured.
+    /// </summary>
+    public bool Sync(DrawObject* current)
     {
-        if (current != Target)
+        if (current != Target || !NearlyEqual(current->Scale, LastApplied))
         {
             Target = current;
             Original = current->Scale;
             LastApplied = Original;
+            return true;
         }
-        else if (!NearlyEqual(current->Scale, LastApplied))
-        {
-            Original = current->Scale;
-            LastApplied = Original;
-        }
+        return false;
     }
 
     public void Apply(Vector3 scale)
@@ -97,6 +100,15 @@ public sealed unsafe class MountScaling : IDisposable
     private int cleanFrames;
     private DrawObject* calibratedFor;
     private float heightPerCalculate;
+
+    // The game sizes a mount once, when it appears: a fixed per-mount size times the
+    // MountCustomize value for the rider's race and gender at that moment. It doesn't
+    // follow later race/gender changes (Glamourer) or height. We remember which race/gender
+    // value it used so we can swap it for the current one. summonDraw is only compared,
+    // never dereferenced.
+    private DrawObject* summonDraw;
+    private Vector3 summonScale;
+    private float? summonRaceScale;
 
     public DebugState Debug;
 
@@ -143,12 +155,15 @@ public sealed unsafe class MountScaling : IDisposable
             // back for a few frames so Calibrate gets a clean reading.
             mount.Restore(mountDraw);
             rider.Restore(playerDraw);
+            if (mountDraw == null)
+                summonDraw = null; // next mount is a new summon
             return;
         }
 
         // Read the rider's own scale before we compensate it, so our write never feeds back in.
         rider.Sync(playerDraw);
-        mount.Sync(mountDraw);
+        if (mount.Sync(mountDraw))
+            RememberSummon(player, mountDraw, mount.Original);
 
         var ratio = ReadHeightRatio(player, rider.Original);
         if (ratio is not { } r)
@@ -168,13 +183,32 @@ public sealed unsafe class MountScaling : IDisposable
         Debug.RiderApplied = rider.LastApplied;
         Debug.RiderSkeletonScale = SkeletonScale(playerDraw);
         Debug.MountSkeletonScale = SkeletonScale(mountDraw);
-        Debug.MountRaceScale = MountSizes.RaceScale(Debug.MountId, Debug.Race, Debug.Tribe, Debug.Sex);
+    }
+
+    /// <summary>
+    /// Records the race/gender size the game just used for this mount. Not on our own
+    /// restore/re-capture of the same mount (same object, same scale): the rider may have
+    /// changed look since it was summoned.
+    /// </summary>
+    private void RememberSummon(Character* player, DrawObject* mountDraw, Vector3 scale)
+    {
+        if (mountDraw == summonDraw && ScaleOverride.NearlyEqual(scale, summonScale))
+            return;
+
+        var c = player->DrawData.CustomizeData;
+        summonDraw = mountDraw;
+        summonScale = scale;
+        summonRaceScale = MountSizes.RaceScale(player->Mount.MountId, c.Race, c.Tribe, c.Sex);
     }
 
     // No size limits; ReadHeightRatio only rejects garbage reads.
     private float ComputeFactor(float ratio) => 1f + config.Strength * (ratio - 1f);
 
-    /// <summary>Your actual height divided by the vanilla height for your clan, sex and slider.</summary>
+    /// <summary>
+    /// How much bigger the mount should be than the game made it:
+    /// (race/gender size for how you look now ÷ the one the game used when it appeared)
+    /// × (your rendered height ÷ an average, 50%-slider member of your current clan and gender).
+    /// </summary>
     private float? ReadHeightRatio(Character* player, Vector3 riderScale)
     {
         var customize = player->DrawData.CustomizeData;
@@ -194,16 +228,27 @@ public sealed unsafe class MountScaling : IDisposable
         Debug.Height = height;
         Debug.ModelScaleY = model;
 
-        var vanilla = VanillaBaseline.Height(customize.Tribe, customize.Sex, customize.Height);
+        // The game's per-race mount sizes are for an average member, so compare against 50%.
+        var vanilla = VanillaBaseline.Height(customize.Tribe, customize.Sex, 50);
         Debug.VanillaHeight = vanilla ?? 0;
 
         if (vanilla is not { } v || !IsSane(v) || !IsSane(height))
             return null;
 
-        var ratio = height / v;
+        var heightRatio = height / v;
         if (config.IncludeModelScale && IsSane(model))
-            ratio *= model;
+            heightRatio *= model;
 
+        // Mounts without a MountCustomize entry don't vary by race; leave that part at 1.
+        var visualRaceScale = MountSizes.RaceScale(player->Mount.MountId, customize.Race, customize.Tribe, customize.Sex);
+        var raceAdjust = visualRaceScale is { } vr && summonRaceScale is { } sr && IsSane(vr) && IsSane(sr) ? vr / sr : 1f;
+
+        Debug.HeightRatio = heightRatio;
+        Debug.SummonRaceScale = summonRaceScale;
+        Debug.VisualRaceScale = visualRaceScale;
+        Debug.RaceAdjust = raceAdjust;
+
+        var ratio = raceAdjust * heightRatio;
         Debug.Ratio = ratio;
         return ratio;
     }
