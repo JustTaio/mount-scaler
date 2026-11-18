@@ -1,0 +1,47 @@
+# Mount Scaler
+
+A Dalamud plugin for Final Fantasy XIV that scales your mount to match your character's height.
+
+The game already sizes every mount for your race and gender, but it uses the vanilla height table. If you change your height with Penumbra racial scaling (or Customize+ / Brio), your mount stays its normal size. Mount Scaler fixes that by scaling the mount by how much taller or shorter you are than vanilla for your clan, gender and height slider. You stay your normal size on it.
+
+- Only your own mount, and only while you're driving it (not when riding pillion).
+- Client-side and visual only: only you see it, and hitboxes, nameplates and the camera are unchanged.
+- Updates live, so toggling your height mod mid-ride takes effect straight away.
+- Turning the plugin off or dismounting puts everything back to normal.
+
+## Install
+
+1. In game, type `/xlsettings` and open the **Experimental** tab.
+2. Under **Custom Plugin Repositories**, paste this URL, click **+**, tick **Enabled**, then **Save and Close**:
+   ```
+   https://raw.githubusercontent.com/JustTaio/mount-scaler/main/repo.json
+   ```
+3. Type `/xlplugins`, search for **Mount Scaler** and install it.
+
+Type `/mountscale` to open the settings.
+
+## Settings
+
+- **Strength**: 0% leaves mounts vanilla, 100% follows your height change fully.
+- **Keep rider at normal size**: you're attached to the mount and would otherwise grow and shrink with it.
+- **Include Customize+ / Brio scale**: also follow extra model scale from those plugins.
+- **Debug**: shows your height, the vanilla height for your character and the scale being applied.
+
+## Building
+
+Requires the .NET 10 SDK and a Dalamud dev install (XIVLauncher / XIVLauncher.Core).
+
+```bash
+./build.sh
+```
+
+The plugin is built to `MountScaler/bin/Release/MountScaler.dll`, and the installable package to `MountScaler/bin/Release/MountScaler/latest.zip`.
+
+## Releasing a new version
+
+1. Bump `<Version>` in `MountScaler/MountScaler.csproj`.
+2. Run `./release.sh`. It builds the plugin and updates `repo.json` with the new version and timestamp.
+3. Commit and push.
+4. Create a GitHub release and attach `MountScaler/bin/Release/MountScaler/latest.zip`.
+
+`repo.json` always points at the latest release's `latest.zip`, so Dalamud picks up the update once the release is published.
