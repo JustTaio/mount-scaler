@@ -1,8 +1,8 @@
 {
   "Author": "taio",
   "Name": "Mount Scaler",
-  "Punchline": "Your mount grows and shrinks with your character's height.",
-  "Description": "Scales the mount you are driving by how much taller or shorter you are than vanilla for your race, clan and height slider, so Penumbra racial scaling mods (and Customize+ / Brio scale) carry over to your mount. You stay your normal size on it. Client-side and visual only: only you see it, and only your own mount is changed.",
+  "Punchline": "Mounts grow and shrink with their riders' height.",
+  "Description": "Sizes mounts for how their drivers actually look: height slider, Penumbra racial scaling, Customize+ / Brio scale, and Glamourer race or gender changes. Works on your mount and, optionally, other players' (using the mods you see on them). Riders stay their normal size, and your camera can follow your mount's height. Client-side and visual only.",
   "ApplicableVersion": "any",
   "RepoUrl": "https://github.com/JustTaio/mount-scaler",
   "Tags": [ "mount", "scale", "height", "racial scaling" ]

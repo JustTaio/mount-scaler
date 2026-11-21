@@ -34,6 +34,9 @@ public sealed class ConfigWindow : Window
         changed |= ImGui.Checkbox("Keep rider at normal size", ref config.KeepRiderSize);
         Hint("You sit on the mount and would otherwise grow and shrink with it.");
 
+        changed |= ImGui.Checkbox("Scale other players' mounts", ref config.ScaleOthers);
+        Hint("Sizes everyone's mount for its driver, using the mods you see on them.");
+
         changed |= ImGui.Checkbox("Move camera with mount height", ref config.MoveCamera);
         Hint("Aims the camera higher or lower as your seat moves. Zoom is left alone.");
 
@@ -58,9 +61,11 @@ public sealed class ConfigWindow : Window
             return;
         }
 
+        ImGui.TextUnformatted($"Other players' mounts scaled: {d.OthersScaled}");
+
         if (d.Pillion)
         {
-            ImGui.TextUnformatted("Riding pillion: leaving the mount alone.");
+            ImGui.TextUnformatted("Riding pillion: the driver's mount is scaled for them; you're kept at your size.");
             return;
         }
         if (!d.HasMount)

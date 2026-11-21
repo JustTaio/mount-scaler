@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.Numerics;
 using Dalamud.Game.ClientState.Conditions;
 using Dalamud.Plugin.Services;
@@ -42,6 +43,7 @@ public struct DebugState
     public float LookAtHeight;     // world camera look-at height (0x234) after our write
     public float LookAtHeightBase; // what the game/Cammy had there
     public float InterpolatedLookAtHeight; // 0x240, what the camera is gliding through
+    public int OthersScaled;       // other players' mounts scaled this frame
 }
 
 /// <summary>
@@ -128,39 +130,60 @@ internal unsafe struct CameraOverride
     public void Forget() => target = null;
 }
 
+
+/// <summary>Per-player state, kept while the player is drawn.</summary>
+internal sealed unsafe class PlayerTrack
+{
+    /// <summary>Our compensation on this player's own model while they sit on a scaled mount.</summary>
+    public ScaleOverride Self;
+
+    // The skeleton scale is the rendered height, but it also picks up the rider scale we
+    // write (a frame late), so reading it while we're compensating loops. Instead we learn
+    // skeleton-height-per-CalculateHeight while we're not touching the player or their mount,
+    // and use CalculateHeight (which our writes can't affect) times that while they ride.
+    public int CleanFrames;
+    public DrawObject* CalibratedFor; // only compared
+    public float HeightPerCalculate;
+}
+
+/// <summary>Per-mount state, keyed by the driver, kept while they drive.</summary>
+internal sealed unsafe class MountTrack
+{
+    public ScaleOverride Mount;
+
+    // The game sizes a mount once, when it appears: a fixed per-mount size times the
+    // MountCustomize value for the driver's race and gender at that moment. It doesn't follow
+    // later race/gender changes (Glamourer) or height. We remember which value it used so we
+    // can swap it for the current one. SummonDraw is only compared, never dereferenced.
+    public DrawObject* SummonDraw;
+    public Vector3 SummonScale;
+    public float? SummonRaceScale;
+}
+
 /// <summary>
-/// Scales the local player's own mount by how much their height differs from vanilla,
-/// keeping the rider at their normal size. Race and the vanilla height slider are
-/// already handled by the game.
+/// Scales every drawn player's mount (yours, and others' if enabled) by how much the driver's
+/// rendered look and height differ from what the game sized the mount for, and keeps everyone
+/// sitting on it at their true size. Also moves your camera with your own mount.
 /// </summary>
 public sealed unsafe class MountScaling : IDisposable
 {
     private readonly Configuration config;
 
-    private ScaleOverride mount;
-    private ScaleOverride rider;
-    private CameraOverride camera;
+    private readonly Dictionary<uint, PlayerTrack> players = new();
+    private readonly Dictionary<uint, MountTrack> mounts = new();
 
+    // Reused every frame.
+    private readonly Dictionary<uint, nint> visible = new();
+    private readonly HashSet<uint> passengerIds = new();
+    private readonly List<uint> drivers = new();
+    private readonly Dictionary<uint, float> compensation = new();
+    private readonly List<uint> stale = new();
+
+    private const int CleanFramesNeeded = 3;
+
+    private CameraOverride camera;
     private const float CameraEaseSeconds = 0.1f;
     private float cameraLift;
-
-    // The skeleton scale is the rendered height, but it also picks up the rider scale we
-    // write (a frame late), so reading it while we're compensating loops. Instead we learn
-    // skeleton-height-per-CalculateHeight while we're not touching the rider, and use
-    // CalculateHeight (which our writes can't affect) times that while mounted.
-    private const int CleanFramesNeeded = 3;
-    private int cleanFrames;
-    private DrawObject* calibratedFor;
-    private float heightPerCalculate;
-
-    // The game sizes a mount once, when it appears: a fixed per-mount size times the
-    // MountCustomize value for the rider's race and gender at that moment. It doesn't
-    // follow later race/gender changes (Glamourer) or height. We remember which race/gender
-    // value it used so we can swap it for the current one. summonDraw is only compared,
-    // never dereferenced.
-    private DrawObject* summonDraw;
-    private Vector3 summonScale;
-    private float? summonRaceScale;
 
     public DebugState Debug;
 
@@ -181,68 +204,192 @@ public sealed unsafe class MountScaling : IDisposable
     {
         Debug = default;
 
-        var player = GetPlayer();
-        Debug.HasPlayer = player != null;
-        if (player == null)
+        var local = GetLocalPlayer();
+        Debug.HasPlayer = local != null;
+        if (local == null)
         {
-            mount.Forget();
-            rider.Forget();
-            RestoreCamera(); // the camera outlives the player object (zoning)
+            // Zoning: the objects are going away, so there's nothing safe to write to.
+            foreach (var t in players.Values) t.Self.Forget();
+            foreach (var t in mounts.Values) t.Mount.Forget();
+            players.Clear();
+            mounts.Clear();
+            RestoreCamera(); // the camera outlives the player object
             return;
         }
 
-        var factor = UpdateScaling(player);
-        UpdateCamera(player, factor, (float)framework.UpdateDelta.TotalSeconds);
-    }
+        var localId = local->EntityId;
+        Debug.Pillion = Plugin.Condition[ConditionFlag.RidingPillion];
 
-    /// <summary>Scales the mount (and compensates the rider). Returns the factor applied, or null if not scaling.</summary>
-    private float? UpdateScaling(Character* player)
-    {
-        var playerDraw = player->DrawObject;
-        Calibrate(player, playerDraw);
+        CollectVisible();
+        FindDrivers(localId);
 
-        var mountDraw = GetOwnMountDrawObject(player);
-        if (mountDraw != null)
+        // Calibrate from last frame's state, before we touch anything this frame.
+        foreach (var (id, address) in visible)
         {
-            Debug.HasMount = true;
-            Debug.MountId = player->Mount.MountId;
+            var c = (Character*)address;
+            var track = GetTrack(id);
+            var mountActive = mounts.TryGetValue(id, out var m) && m.Mount.Target != null;
+            Calibrate(c, track, mountActive);
         }
 
-        if (mountDraw == null || playerDraw == null || !config.Enabled || calibratedFor != playerDraw)
+        // Size each driver's mount; note how much everyone on it must be compensated.
+        compensation.Clear();
+        float? localFactor = null;
+        var others = 0;
+        foreach (var id in drivers)
         {
-            // Dismounted (the mount object is gone), riding pillion, disabled, or the rider's
-            // model is new (plugin loaded mid-ride, Penumbra/Glamourer redraw): put everything
-            // back for a few frames so Calibrate gets a clean reading.
-            mount.Restore(mountDraw);
-            rider.Restore(playerDraw);
-            if (mountDraw == null)
-                summonDraw = null; // next mount is a new summon
+            var isLocal = id == localId;
+            var factor = UpdateMount(id, (Character*)visible[id], isLocal);
+            if (factor is not { } f)
+                continue;
+
+            compensation[id] = f;
+            foreach (var p in ((Character*)visible[id])->Mount.MountedEntityIds)
+                if (p != 0 && p != id && visible.ContainsKey(p))
+                    compensation[p] = f;
+
+            if (isLocal) localFactor = f;
+            else others++;
+        }
+        Debug.OthersScaled = others;
+
+        // Riders: keep everyone on a scaled mount at their true size; put everyone else back.
+        foreach (var (id, address) in visible)
+        {
+            var draw = ((Character*)address)->DrawObject;
+            var track = players[id];
+            if (compensation.TryGetValue(id, out var f))
+            {
+                track.Self.Sync(draw);
+                track.Self.Apply(config.KeepRiderSize ? track.Self.Original / f : track.Self.Original);
+                if (id == localId)
+                {
+                    Debug.RiderOriginal = track.Self.Original;
+                    Debug.RiderApplied = track.Self.LastApplied;
+                    Debug.RiderSkeletonScale = SkeletonScale(draw);
+                }
+            }
+            else
+            {
+                track.Self.Restore(draw);
+            }
+        }
+
+        // Mounts whose driver stopped driving (dismounted, became a passenger) or vanished.
+        stale.Clear();
+        foreach (var (id, track) in mounts)
+        {
+            if (drivers.Contains(id))
+                continue;
+            if (visible.TryGetValue(id, out var address))
+                track.Mount.Restore(GetMountDrawObject((Character*)address));
+            else
+                track.Mount.Forget();
+            stale.Add(id); // the next mount is a new summon
+        }
+        foreach (var id in stale) mounts.Remove(id);
+
+        // Players no longer drawn: their objects may be gone, so just forget them.
+        stale.Clear();
+        foreach (var (id, track) in players)
+        {
+            if (visible.ContainsKey(id))
+                continue;
+            track.Self.Forget();
+            stale.Add(id);
+        }
+        foreach (var id in stale) players.Remove(id);
+
+        UpdateCamera(local, localFactor, (float)framework.UpdateDelta.TotalSeconds);
+    }
+
+    /// <summary>Every player the game is drawing, by entity id.</summary>
+    private void CollectVisible()
+    {
+        visible.Clear();
+        foreach (var p in Plugin.ObjectTable.PlayerObjects)
+        {
+            var c = (Character*)p.Address;
+            if (c == null || c->DrawObject == null || c->EntityId == 0)
+                continue;
+            visible[c->EntityId] = (nint)c;
+        }
+    }
+
+    /// <summary>Players riding their own mount: has a mount object, and isn't in someone else's seats.</summary>
+    private void FindDrivers(uint localId)
+    {
+        passengerIds.Clear();
+        drivers.Clear();
+
+        foreach (var (id, address) in visible)
+        {
+            var c = (Character*)address;
+            if (GetMountDrawObject(c) == null)
+                continue;
+            foreach (var p in c->Mount.MountedEntityIds)
+                if (p != 0 && p != id)
+                    passengerIds.Add(p);
+        }
+
+        foreach (var (id, address) in visible)
+        {
+            if (passengerIds.Contains(id) || GetMountDrawObject((Character*)address) == null)
+                continue;
+            if (id == localId && Debug.Pillion)
+                continue;
+            if (id != localId && !config.ScaleOthers)
+                continue;
+            drivers.Add(id);
+        }
+    }
+
+    /// <summary>Scales one driver's mount. Returns the factor applied, or null if it isn't being scaled.</summary>
+    private float? UpdateMount(uint id, Character* driver, bool isLocal)
+    {
+        var draw = driver->DrawObject;
+        var mountDraw = GetMountDrawObject(driver);
+        var player = GetTrack(id);
+        if (!mounts.TryGetValue(id, out var track))
+            mounts[id] = track = new MountTrack();
+
+        if (isLocal)
+        {
+            Debug.HasMount = true;
+            Debug.MountId = driver->Mount.MountId;
+        }
+
+        if (!config.Enabled || player.CalibratedFor != draw)
+        {
+            // Disabled, or this player's model is new (just appeared, plugin loaded mid-ride,
+            // Penumbra/Glamourer redraw): leave the mount alone for a few frames so their
+            // height can be measured cleanly.
+            track.Mount.Restore(mountDraw);
             return null;
         }
 
         // Read the rider's own scale before we compensate it, so our write never feeds back in.
-        rider.Sync(playerDraw);
-        if (mount.Sync(mountDraw))
-            RememberSummon(player, mountDraw, mount.Original);
+        player.Self.Sync(draw);
+        if (track.Mount.Sync(mountDraw))
+            RememberSummon(track, driver, mountDraw, track.Mount.Original);
 
-        var ratio = ReadHeightRatio(player, rider.Original);
+        var ratio = ReadHeightRatio(driver, player, track, player.Self.Original, isLocal);
         if (ratio is not { } r)
+        {
+            track.Mount.Restore(mountDraw);
             return null;
+        }
 
         var factor = ComputeFactor(r);
-        Debug.Factor = factor;
+        track.Mount.Apply(track.Mount.Original * factor);
 
-        mount.Apply(mount.Original * factor);
-
-        // The rider is attached to a bone on the mount and inherits its scale; divide it back out.
-        rider.Apply(config.KeepRiderSize ? rider.Original / factor : rider.Original);
-
-        Debug.MountOriginal = mount.Original;
-        Debug.MountApplied = mount.LastApplied;
-        Debug.RiderOriginal = rider.Original;
-        Debug.RiderApplied = rider.LastApplied;
-        Debug.RiderSkeletonScale = SkeletonScale(playerDraw);
-        Debug.MountSkeletonScale = SkeletonScale(mountDraw);
+        if (isLocal)
+        {
+            Debug.Factor = factor;
+            Debug.MountOriginal = track.Mount.Original;
+            Debug.MountApplied = track.Mount.LastApplied;
+            Debug.MountSkeletonScale = SkeletonScale(mountDraw);
+        }
         return factor;
     }
 
@@ -252,12 +399,6 @@ public sealed unsafe class MountScaling : IDisposable
     private const int CameraLookAtHeightOffset = 0x234;
     private const int CameraInterpolatedLookAtHeightOffset = 0x240;
 
-    /// <summary>
-    /// Scales the camera's aim height with the mount: the game aims at your character's
-    /// CameraOffset height (e.g. 1.50 on a vanilla mount), so we add that × (factor − 1) to the
-    /// world camera's look-at height, on top of whatever the game or Cammy set, eased in and out.
-    /// Zoom is left alone, and nothing changes in first person.
-    /// </summary>
     /// <summary>The world camera's look-at height field, or null if there's no camera or it looks wrong.</summary>
     private static float* GetLookAtField(out byte* cam)
     {
@@ -281,6 +422,12 @@ public sealed unsafe class MountScaling : IDisposable
             camera.Forget();
     }
 
+    /// <summary>
+    /// Scales the camera's aim height with your own mount: the game aims at your character's
+    /// CameraOffset height (e.g. 1.50 on a vanilla mount), so we add that × (factor − 1) to the
+    /// world camera's look-at height, on top of whatever the game or Cammy set, eased in and out.
+    /// Zoom is left alone, and nothing changes in first person.
+    /// </summary>
     private void UpdateCamera(Character* player, float? factor, float dt)
     {
         var field = GetLookAtField(out var cam);
@@ -321,18 +468,18 @@ public sealed unsafe class MountScaling : IDisposable
 
     /// <summary>
     /// Records the race/gender size the game just used for this mount. Not on our own
-    /// restore/re-capture of the same mount (same object, same scale): the rider may have
+    /// restore/re-capture of the same mount (same object, same scale): the driver may have
     /// changed look since it was summoned.
     /// </summary>
-    private void RememberSummon(Character* player, DrawObject* mountDraw, Vector3 scale)
+    private static void RememberSummon(MountTrack track, Character* driver, DrawObject* mountDraw, Vector3 scale)
     {
-        if (mountDraw == summonDraw && ScaleOverride.NearlyEqual(scale, summonScale))
+        if (mountDraw == track.SummonDraw && ScaleOverride.NearlyEqual(scale, track.SummonScale))
             return;
 
-        var c = GetLook(player, out _);
-        summonDraw = mountDraw;
-        summonScale = scale;
-        summonRaceScale = MountSizes.RaceScale(player->Mount.MountId, c.Race, c.Tribe, c.Sex);
+        var c = GetLook(driver, out _);
+        track.SummonDraw = mountDraw;
+        track.SummonScale = scale;
+        track.SummonRaceScale = MountSizes.RaceScale(driver->Mount.MountId, c.Race, c.Tribe, c.Sex);
     }
 
     // No size limits; ReadHeightRatio only rejects garbage reads.
@@ -340,82 +487,94 @@ public sealed unsafe class MountScaling : IDisposable
 
     /// <summary>
     /// How much bigger the mount should be than the game made it:
-    /// (race/gender size for how you look now ÷ the one the game used when it appeared)
-    /// × (your rendered height ÷ an average, 50%-slider member of your current clan and gender).
+    /// (race/gender size for how the driver looks now ÷ the one the game used when it appeared)
+    /// × (their rendered height ÷ an average, 50%-slider member of their current clan and gender).
     /// </summary>
-    private float? ReadHeightRatio(Character* player, Vector3 riderScale)
+    private float? ReadHeightRatio(Character* driver, PlayerTrack player, MountTrack track, Vector3 riderScale, bool isLocal)
     {
-        var customize = GetLook(player, out var fromModel);
-        var baseCustomize = player->DrawData.CustomizeData;
-        Debug.LookFromModel = fromModel;
-        Debug.BaseRace = baseCustomize.Race;
-        Debug.BaseSex = baseCustomize.Sex;
-        Debug.Race = customize.Race;
-        Debug.Tribe = customize.Tribe;
-        Debug.Sex = customize.Sex;
-        Debug.Slider = customize.Height;
+        var customize = GetLook(driver, out var fromModel);
 
         // Rendered height in racial-scaling-table units (checked in game: 1.42 with a 1.42 mod,
         // 1.24 vanilla), from CalculateHeight and the calibration taken while unmounted.
-        var calculate = player->ModelContainer.CalculateHeight();
-        Debug.CalculateHeight = calculate;
-        Debug.HeightPerCalculate = heightPerCalculate;
-
-        var height = calculate * heightPerCalculate;
+        var calculate = driver->ModelContainer.CalculateHeight();
+        var height = calculate * player.HeightPerCalculate;
         var model = riderScale.Y;
-        Debug.Height = height;
-        Debug.ModelScaleY = model;
 
         // The game's per-race mount sizes are for an average member, so compare against 50%.
         var vanilla = VanillaBaseline.Height(customize.Tribe, customize.Sex, 50);
-        Debug.VanillaHeight = vanilla ?? 0;
 
-        if (vanilla is not { } v || !IsSane(v) || !IsSane(height))
-            return null;
-
-        var heightRatio = height / v;
-        if (config.IncludeModelScale && IsSane(model))
-            heightRatio *= model;
-
+        var visualRaceScale = MountSizes.RaceScale(driver->Mount.MountId, customize.Race, customize.Tribe, customize.Sex);
         // Mounts without a MountCustomize entry don't vary by race; leave that part at 1.
-        var visualRaceScale = MountSizes.RaceScale(player->Mount.MountId, customize.Race, customize.Tribe, customize.Sex);
-        var raceAdjust = visualRaceScale is { } vr && summonRaceScale is { } sr && IsSane(vr) && IsSane(sr) ? vr / sr : 1f;
+        var raceAdjust = visualRaceScale is { } vr && track.SummonRaceScale is { } sr && IsSane(vr) && IsSane(sr) ? vr / sr : 1f;
 
-        Debug.HeightRatio = heightRatio;
-        Debug.SummonRaceScale = summonRaceScale;
-        Debug.VisualRaceScale = visualRaceScale;
-        Debug.RaceAdjust = raceAdjust;
+        float? ratio = null;
+        var heightRatio = 0f;
+        if (vanilla is { } v && IsSane(v) && IsSane(height))
+        {
+            heightRatio = height / v;
+            if (config.IncludeModelScale && IsSane(model))
+                heightRatio *= model;
+            ratio = raceAdjust * heightRatio;
+        }
 
-        var ratio = raceAdjust * heightRatio;
-        Debug.Ratio = ratio;
+        if (isLocal)
+        {
+            var baseCustomize = driver->DrawData.CustomizeData;
+            Debug.LookFromModel = fromModel;
+            Debug.BaseRace = baseCustomize.Race;
+            Debug.BaseSex = baseCustomize.Sex;
+            Debug.Race = customize.Race;
+            Debug.Tribe = customize.Tribe;
+            Debug.Sex = customize.Sex;
+            Debug.Slider = customize.Height;
+            Debug.CalculateHeight = calculate;
+            Debug.HeightPerCalculate = player.HeightPerCalculate;
+            Debug.Height = height;
+            Debug.ModelScaleY = model;
+            Debug.VanillaHeight = vanilla ?? 0;
+            Debug.HeightRatio = heightRatio;
+            Debug.SummonRaceScale = track.SummonRaceScale;
+            Debug.VisualRaceScale = visualRaceScale;
+            Debug.RaceAdjust = raceAdjust;
+            Debug.Ratio = ratio ?? 0;
+        }
+
         return ratio;
     }
 
     /// <summary>
-    /// While we aren't scaling the rider, learn how the skeleton's scale (the rendered height,
-    /// times the draw object scale) relates to CalculateHeight.
+    /// While we aren't touching this player or their mount, learn how their skeleton's scale
+    /// (the rendered height, times the draw object scale) relates to CalculateHeight.
     /// </summary>
-    private void Calibrate(Character* player, DrawObject* playerDraw)
+    private static void Calibrate(Character* c, PlayerTrack track, bool mountActive)
     {
+        var draw = c->DrawObject;
         // A scaled mount also leaks into the rider's skeleton, so both must be untouched.
-        if (rider.Target != null || mount.Target != null || playerDraw == null)
+        if (track.Self.Target != null || mountActive || draw == null)
         {
-            cleanFrames = 0;
+            track.CleanFrames = 0;
             return;
         }
 
         // Our last restore may still be in the skeleton for a frame or two.
-        if (++cleanFrames < CleanFramesNeeded)
+        if (++track.CleanFrames < CleanFramesNeeded)
             return;
 
-        var calculate = player->ModelContainer.CalculateHeight();
-        var skeleton = SkeletonScale(playerDraw).Y;
-        var model = playerDraw->Scale.Y;
+        var calculate = c->ModelContainer.CalculateHeight();
+        var skeleton = SkeletonScale(draw).Y;
+        var model = draw->Scale.Y;
         if (!IsSane(calculate) || !IsSane(skeleton) || !IsSane(model))
             return;
 
-        heightPerCalculate = skeleton / model / calculate;
-        calibratedFor = playerDraw;
+        track.HeightPerCalculate = skeleton / model / calculate;
+        track.CalibratedFor = draw;
+    }
+
+    private PlayerTrack GetTrack(uint id)
+    {
+        if (!players.TryGetValue(id, out var track))
+            players[id] = track = new PlayerTrack();
+        return track;
     }
 
     /// <summary>
@@ -423,9 +582,9 @@ public sealed unsafe class MountScaling : IDisposable
     /// and leaves the character's own data alone, and the game sizes mounts from the
     /// rendered one, so prefer it.
     /// </summary>
-    private static CustomizeData GetLook(Character* player, out bool fromModel)
+    private static CustomizeData GetLook(Character* c, out bool fromModel)
     {
-        var draw = player->DrawObject;
+        var draw = c->DrawObject;
         if (draw != null
             && draw->GetObjectType() == ObjectType.CharacterBase
             && ((CharacterBase*)draw)->GetModelType() == CharacterBase.ModelType.Human)
@@ -435,7 +594,7 @@ public sealed unsafe class MountScaling : IDisposable
         }
 
         fromModel = false;
-        return player->DrawData.CustomizeData;
+        return c->DrawData.CustomizeData;
     }
 
     private static Vector3 SkeletonScale(DrawObject* draw)
@@ -448,29 +607,31 @@ public sealed unsafe class MountScaling : IDisposable
 
     private void RestoreAll()
     {
-        var player = GetPlayer();
-        mount.Restore(player != null ? GetOwnMountDrawObject(player) : null);
-        rider.Restore(player != null ? player->DrawObject : null);
+        if (GetLocalPlayer() != null)
+        {
+            CollectVisible();
+            foreach (var (id, track) in players)
+                track.Self.Restore(visible.TryGetValue(id, out var a) ? ((Character*)a)->DrawObject : null);
+            foreach (var (id, track) in mounts)
+                track.Mount.Restore(visible.TryGetValue(id, out var a) ? GetMountDrawObject((Character*)a) : null);
+        }
+        players.Clear();
+        mounts.Clear();
         RestoreCamera();
     }
 
-    private static Character* GetPlayer()
+    private static Character* GetLocalPlayer()
     {
         var player = Plugin.ObjectTable.LocalPlayer;
         return player == null ? null : (Character*)player.Address;
     }
 
-    /// <summary>The draw object of the mount the player owns and drives, or null.</summary>
-    private DrawObject* GetOwnMountDrawObject(Character* player)
+    /// <summary>The draw object of the mount this character owns, or null.</summary>
+    private static DrawObject* GetMountDrawObject(Character* c)
     {
-        Debug.Pillion = Plugin.Condition[ConditionFlag.RidingPillion];
-        if (Debug.Pillion)
+        var mountObject = c->Mount.MountObject;
+        if (mountObject == null || c->Mount.MountId == 0)
             return null;
-
-        var mountObject = player->Mount.MountObject;
-        if (mountObject == null || player->Mount.MountId == 0)
-            return null;
-
         return mountObject->DrawObject;
     }
 

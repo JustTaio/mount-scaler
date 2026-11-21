@@ -19,6 +19,9 @@ public class Configuration : IPluginConfiguration
     /// <summary>Cancel out the mount's scale on the rider, who inherits it through the seat attachment.</summary>
     public bool KeepRiderSize = true;
 
+    /// <summary>Also scale other players' mounts (by their own rendered look and height).</summary>
+    public bool ScaleOthers = true;
+
     /// <summary>Raise/lower the camera's aim point by how far the scaled mount moved your seat.</summary>
     public bool MoveCamera = false;
 
