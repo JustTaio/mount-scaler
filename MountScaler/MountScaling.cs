@@ -144,6 +144,28 @@ internal sealed unsafe class PlayerTrack
     public int CleanFrames;
     public DrawObject* CalibratedFor; // only compared
     public float HeightPerCalculate;
+
+    // Right after a redraw the new model can briefly report a default-sized skeleton before
+    // the game applies the real height, so only trust a reading that has held steady.
+    public float LastReading;
+    public int StableFrames;
+}
+
+/// <summary>One other mounted player, for the Debug panel.</summary>
+public struct OtherDebug
+{
+    public string Name;
+    public string Status;
+    public float Ratio;
+    public float Factor;
+    public float HeightPerCalculate;
+    public int StableFrames;
+    public bool ModelVisible;
+    public byte LoadState;
+    public Vector3 MountSeen;   // mount scale at the start of the frame, before our write
+    public Vector3 MountOriginal;
+    public Vector3 MountApplied;
+    public int GameResets;     // times the mount's size changed under us since we started on it
 }
 
 /// <summary>Per-mount state, keyed by the driver, kept while they drive.</summary>
@@ -158,6 +180,8 @@ internal sealed unsafe class MountTrack
     public DrawObject* SummonDraw;
     public Vector3 SummonScale;
     public float? SummonRaceScale;
+
+    public int GameResets; // debug: Sync re-captures on the same mount object
 }
 
 /// <summary>
@@ -180,6 +204,12 @@ public sealed unsafe class MountScaling : IDisposable
     private readonly List<uint> stale = new();
 
     private const int CleanFramesNeeded = 3;
+    private const int StableFramesNeeded = 20; // ~1/3 s at 60 fps
+
+    /// <summary>Set by the config window while its debug section is open, to fill <see cref="Others"/>.</summary>
+    public bool CollectDetails;
+    public readonly List<OtherDebug> Others = new();
+    private readonly Dictionary<uint, string> names = new();
 
     private CameraOverride camera;
     private const float CameraEaseSeconds = 0.1f;
@@ -203,6 +233,7 @@ public sealed unsafe class MountScaling : IDisposable
     private void OnUpdate(IFramework framework)
     {
         Debug = default;
+        Others.Clear();
 
         var local = GetLocalPlayer();
         Debug.HasPlayer = local != null;
@@ -252,6 +283,13 @@ public sealed unsafe class MountScaling : IDisposable
             else others++;
         }
         Debug.OthersScaled = others;
+
+        if (CollectDetails)
+        {
+            foreach (var id in passengerIds)
+                if (id != localId && visible.ContainsKey(id))
+                    Others.Add(new OtherDebug { Name = NameOf(id), Status = compensation.ContainsKey(id) ? "passenger, kept at size" : "passenger" });
+        }
 
         // Riders: keep everyone on a scaled mount at their true size; put everyone else back.
         foreach (var (id, address) in visible)
@@ -307,12 +345,15 @@ public sealed unsafe class MountScaling : IDisposable
     private void CollectVisible()
     {
         visible.Clear();
+        names.Clear();
         foreach (var p in Plugin.ObjectTable.PlayerObjects)
         {
             var c = (Character*)p.Address;
             if (c == null || c->DrawObject == null || c->EntityId == 0)
                 continue;
             visible[c->EntityId] = (nint)c;
+            if (CollectDetails)
+                names[c->EntityId] = p.Name.TextValue;
         }
     }
 
@@ -359,29 +400,57 @@ public sealed unsafe class MountScaling : IDisposable
             Debug.MountId = driver->Mount.MountId;
         }
 
+        var seen = mountDraw->Scale;
+        var detail = new OtherDebug
+        {
+            Name = isLocal ? "" : NameOf(id),
+            MountSeen = seen,
+            HeightPerCalculate = player.HeightPerCalculate,
+            StableFrames = player.StableFrames,
+            ModelVisible = draw->IsVisible,
+            LoadState = draw->LoadState,
+        };
+
         if (!config.Enabled || player.CalibratedFor != draw)
         {
             // Disabled, or this player's model is new (just appeared, plugin loaded mid-ride,
-            // Penumbra/Glamourer redraw): leave the mount alone for a few frames so their
-            // height can be measured cleanly.
+            // Penumbra/Glamourer redraw): leave the mount alone until their height has been
+            // measured cleanly.
             track.Mount.Restore(mountDraw);
+            detail.Status = !config.Enabled ? "plugin off" : $"measuring height ({Math.Min(player.StableFrames, StableFramesNeeded)}/{StableFramesNeeded})";
+            AddDetail(isLocal, detail);
             return null;
         }
 
         // Read the rider's own scale before we compensate it, so our write never feeds back in.
         player.Self.Sync(draw);
+        var sameMount = track.Mount.Target == mountDraw;
         if (track.Mount.Sync(mountDraw))
+        {
+            if (sameMount)
+                track.GameResets++;
             RememberSummon(track, driver, mountDraw, track.Mount.Original);
+        }
 
         var ratio = ReadHeightRatio(driver, player, track, player.Self.Original, isLocal);
         if (ratio is not { } r)
         {
             track.Mount.Restore(mountDraw);
+            detail.Status = "bad height reading";
+            AddDetail(isLocal, detail);
             return null;
         }
 
         var factor = ComputeFactor(r);
         track.Mount.Apply(track.Mount.Original * factor);
+
+        detail.Status = "scaled";
+        detail.Ratio = r;
+        detail.Factor = factor;
+        detail.MountOriginal = track.Mount.Original;
+        detail.MountApplied = track.Mount.LastApplied;
+        detail.GameResets = track.GameResets;
+        AddDetail(isLocal, detail);
 
         if (isLocal)
         {
@@ -560,15 +629,45 @@ public sealed unsafe class MountScaling : IDisposable
         if (++track.CleanFrames < CleanFramesNeeded)
             return;
 
+        // A model that's still loading after a redraw isn't shown yet and can report a
+        // default-sized skeleton; wait until it's visible.
+        if (!draw->IsVisible)
+        {
+            track.StableFrames = 0;
+            return;
+        }
+
         var calculate = c->ModelContainer.CalculateHeight();
         var skeleton = SkeletonScale(draw).Y;
         var model = draw->Scale.Y;
         if (!IsSane(calculate) || !IsSane(skeleton) || !IsSane(model))
+        {
+            track.StableFrames = 0;
+            return;
+        }
+
+        var reading = skeleton / model / calculate;
+        if (MathF.Abs(reading - track.LastReading) <= reading * 1e-4f)
+            track.StableFrames++;
+        else
+            track.StableFrames = 0;
+        track.LastReading = reading;
+
+        // Keep refining while untouched, but only start scaling on a steady reading.
+        if (track.StableFrames < StableFramesNeeded)
             return;
 
-        track.HeightPerCalculate = skeleton / model / calculate;
+        track.HeightPerCalculate = reading;
         track.CalibratedFor = draw;
     }
+
+    private void AddDetail(bool isLocal, OtherDebug detail)
+    {
+        if (CollectDetails && !isLocal)
+            Others.Add(detail);
+    }
+
+    private string NameOf(uint id) => names.TryGetValue(id, out var n) ? n : $"#{id:X}";
 
     private PlayerTrack GetTrack(uint id)
     {

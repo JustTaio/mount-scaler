@@ -45,11 +45,48 @@ public sealed class ConfigWindow : Window
         if (!VanillaBaseline.Loaded)
             ImGui.TextColored(new Vector4(1f, 0.5f, 0.3f, 1f), "Couldn't read the vanilla height table; scaling is off.");
 
-        if (ImGui.CollapsingHeader("Debug"))
+        var debugOpen = ImGui.CollapsingHeader("Debug");
+        if (debugOpen)
             DrawDebug();
+
+        var othersOpen = ImGui.CollapsingHeader("Other players");
+        if (othersOpen)
+            DrawOthers();
+
+        // Names are only gathered while this list is on screen.
+        scaling.CollectDetails = othersOpen;
 
         if (changed)
             config.Save();
+    }
+
+    public override void OnClose() => scaling.CollectDetails = false;
+
+    private void DrawOthers()
+    {
+        if (scaling.Others.Count == 0)
+        {
+            ImGui.TextUnformatted(config.ScaleOthers ? "No other mounted players drawn." : "Scaling other players' mounts is off.");
+            return;
+        }
+
+        foreach (var o in scaling.Others)
+        {
+            ImGui.TextUnformatted($"{o.Name}: {o.Status}");
+            if (o.Status.StartsWith("passenger"))
+                continue;
+
+            ImGui.Indent();
+            if (o.Status == "scaled")
+            {
+                ImGui.TextUnformatted($"Ratio {o.Ratio:F3}, factor {o.Factor:F3}x");
+                ImGui.TextUnformatted($"Mount {Fmt(o.MountOriginal)} -> {Fmt(o.MountApplied)}, seen {Fmt(o.MountSeen)}");
+                if (o.GameResets > 0)
+                    ImGui.TextUnformatted($"Game reset the mount's size {o.GameResets} time(s)");
+            }
+            ImGui.TextUnformatted($"Height calibration {o.HeightPerCalculate:F4}, steady {o.StableFrames}, visible {o.ModelVisible}, load state {o.LoadState}");
+            ImGui.Unindent();
+        }
     }
 
     private void DrawDebug()

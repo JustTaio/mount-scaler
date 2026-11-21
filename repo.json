@@ -3,7 +3,7 @@
     "Author": "taio",
     "Name": "Mount Scaler",
     "InternalName": "MountScaler",
-    "AssemblyVersion": "0.2.0.0",
+    "AssemblyVersion": "0.2.1.0",
     "Punchline": "Mounts grow and shrink with their riders' height.",
     "Description": "Sizes mounts for how their drivers actually look: height slider, Penumbra racial scaling, Customize+ / Brio scale, and Glamourer race or gender changes. Works on your mount and, optionally, other players' (using the mods you see on them). Riders stay their normal size, and your camera can follow your mount's height. Client-side and visual only.",
     "ApplicableVersion": "any",
@@ -19,7 +19,7 @@
     "IsHide": false,
     "IsTestingExclusive": false,
     "AcceptsFeedback": false,
-    "LastUpdate": 1795235941,
+    "LastUpdate": 1795237308,
     "DownloadLinkInstall": "https://github.com/JustTaio/mount-scaler/releases/latest/download/latest.zip",
     "DownloadLinkUpdate": "https://github.com/JustTaio/mount-scaler/releases/latest/download/latest.zip",
     "DownloadLinkTesting": "https://github.com/JustTaio/mount-scaler/releases/latest/download/latest.zip"
