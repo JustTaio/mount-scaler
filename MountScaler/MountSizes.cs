@@ -3,7 +3,6 @@ using Lumina.Excel.Sheets;
 
 namespace MountScaler;
 
-/// <summary>The game's own per-race mount size (MountCustomize sheet). Debug display only.</summary>
 public static class MountSizes
 {
     private static readonly Dictionary<(uint, byte, byte, byte), float?> Cache = new();

@@ -2,25 +2,13 @@ using System;
 
 namespace MountScaler;
 
-/// <summary>
-/// The vanilla racial scaling table from human.cmp. Lumina reads the game's own
-/// sqpack files, so Penumbra's racial scaling mods don't affect these values.
-///
-/// The game already sizes each mount for the rider's race and gender
-/// (MountCustomize sheet) times this vanilla height, e.g. Garlond GL-II on a
-/// Xaela male: 1.20 × 1.033 = 1.24. So the plugin only adds the difference
-/// between the rider's actual height and this vanilla height.
-/// </summary>
+// Vanilla racial scaling from human.cmp. Lumina reads the game's own files, so Penumbra mods don't affect it.
 public static class VanillaBaseline
 {
     private const string CmpPath = "chara/xls/charamake/human.cmp";
 
-    // 56-byte entries: MaleMin, MaleMax, MaleTailMin, MaleTailMax, FemaleMin, FemaleMax, ...
-    // (same layout Penumbra edits). Ten entries per race; the race's two clans are the
-    // first two: Midlander 0, Highlander 1, Wildwood 10, Duskwight 11, ... Xaela 51.
-    // Checked in game 2026-11: a Xaela male at 100% renders at 1.24 = entry 51's MaleMax.
-    // 0x2C800 matches the current game files (file size 0x2D980);
-    // 0x2A800 is the older layout, kept as a fallback.
+    // 56-byte entries in Penumbra's layout, ten per race, the race's two clans first.
+    // 0x2C800 is the current layout, 0x2A800 the older one.
     private static readonly int[] RacialScalingStarts = [0x2C800, 0x2A800];
     private const int EntrySize = 56;
     private const int ClanCount = 16;
@@ -76,7 +64,7 @@ public static class VanillaBaseline
         }
     }
 
-    /// <summary>Vanilla height multiplier for a clan (tribe id 1-16), sex (0 male, 1 female) and height slider (0-100).</summary>
+    // tribe 1-16, sex 0 male / 1 female, slider 0-100
     public static float? Height(byte tribe, byte sex, byte slider)
     {
         if (table == null || tribe is < 1 or > ClanCount || sex > 1)

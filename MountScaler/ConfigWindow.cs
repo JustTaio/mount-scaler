@@ -53,7 +53,6 @@ public sealed class ConfigWindow : Window
         if (othersOpen)
             DrawOthers();
 
-        // Names are only gathered while this list is on screen.
         scaling.CollectDetails = othersOpen;
 
         if (changed)

@@ -1,7 +1,5 @@
 #!/usr/bin/env bash
-# Builds the plugin and syncs repo.json with the built manifest (version, API level,
-# description) plus a fresh LastUpdate timestamp. Then attach
-# MountScaler/bin/Release/MountScaler/latest.zip to a new GitHub release.
+# Builds and syncs repo.json with the built manifest.
 set -euo pipefail
 cd "$(dirname "$0")"
 

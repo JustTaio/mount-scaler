@@ -1,5 +1,9 @@
 # Mount Scaler
 
+> **Moved:** Mount Scaler now lives in [taiotools](https://github.com/JustTaio/taiotools) with my other plugins.
+> Swap your custom repository URL for `https://raw.githubusercontent.com/JustTaio/taiotools/main/repo.json`.
+> The old URL gets you 0.2.2, but later versions are only released from taiotools.
+
 A Dalamud plugin for Final Fantasy XIV that scales mounts to match their riders' height.
 
 The game sizes each mount once, when it's summoned, for the rider's race and gender at an average height. If someone is taller or shorter (height slider, Penumbra racial scaling, Customize+ / Brio), or changes race or gender with Glamourer, their mount stays the same size. Mount Scaler fixes that by sizing the mount for how its driver actually looks.
@@ -15,7 +19,7 @@ The game sizes each mount once, when it's summoned, for the rider's race and gen
 1. In game, type `/xlsettings` and open the **Experimental** tab.
 2. Under **Custom Plugin Repositories**, paste this URL, click **+**, tick **Enabled**, then **Save and Close**:
    ```
-   https://raw.githubusercontent.com/JustTaio/mount-scaler/main/repo.json
+   https://raw.githubusercontent.com/JustTaio/taiotools/main/repo.json
    ```
 3. Type `/xlplugins`, search for **Mount Scaler** and install it.
 

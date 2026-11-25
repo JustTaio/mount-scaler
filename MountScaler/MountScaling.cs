@@ -8,58 +8,51 @@ using FFXIVClientStructs.FFXIV.Client.Graphics.Scene;
 
 namespace MountScaler;
 
-/// <summary>Values from the last frame, shown in the config window's debug section.</summary>
 public struct DebugState
 {
     public bool HasPlayer;
     public bool Pillion;
     public bool HasMount;
     public uint MountId;
-    public byte Race, Tribe, Sex, Slider; // as rendered
-    public bool LookFromModel;            // read from the rendered model (vs the character's own data)
-    public byte BaseRace, BaseSex;        // the character's own data, for comparison
-    public float Height;          // rider skeleton scale: rendered height multiplier incl. Penumbra racial scaling
-    public float CalculateHeight; // ModelContainer.CalculateHeight (height x ~1.75)
-    public float HeightPerCalculate; // calibration taken while unmounted
-    public float VanillaHeight;   // average (50% slider) member of your current clan and gender, unmodded
-    public float ModelScaleY;     // rider draw object Scale.Y before our compensation (Customize+ / Brio)
-    public float HeightRatio;     // your height / VanillaHeight (x model scale)
-    public float? SummonRaceScale; // MountCustomize value the game used when the mount appeared
-    public float? VisualRaceScale; // MountCustomize value for how you look now
-    public float RaceAdjust;      // Visual / Summon
-    public float Ratio;           // RaceAdjust x HeightRatio
-    public float Factor;          // after strength
+    public byte Race, Tribe, Sex, Slider;
+    public bool LookFromModel;
+    public byte BaseRace, BaseSex;
+    public float Height;
+    public float CalculateHeight;
+    public float HeightPerCalculate;
+    public float VanillaHeight;
+    public float ModelScaleY;
+    public float HeightRatio;
+    public float? SummonRaceScale;
+    public float? VisualRaceScale;
+    public float RaceAdjust;
+    public float Ratio;
+    public float Factor;
     public Vector3 MountOriginal;
     public Vector3 MountApplied;
     public Vector3 RiderOriginal;
     public Vector3 RiderApplied;
     public Vector3 RiderSkeletonScale;
     public Vector3 MountSkeletonScale;
-    public float AimHeight;        // your CameraOffset.Y: the game's vanilla aim height
+    public float AimHeight;
     public bool FirstPerson;
-    public float CameraLiftTarget; // aim height x (factor - 1)
-    public float CameraLift;       // eased value currently added
+    public float CameraLiftTarget;
+    public float CameraLift;
     public bool CameraFound;
-    public float LookAtHeight;     // world camera look-at height (0x234) after our write
-    public float LookAtHeightBase; // what the game/Cammy had there
-    public float InterpolatedLookAtHeight; // 0x240, what the camera is gliding through
-    public int OthersScaled;       // other players' mounts scaled this frame
+    public float LookAtHeight;
+    public float LookAtHeightBase;
+    public float InterpolatedLookAtHeight;
+    public int OthersScaled;
 }
 
-/// <summary>
-/// A scale we've written to a draw object, so it can be updated or undone.
-/// The pointer is only dereferenced after checking it is still the live draw object.
-/// </summary>
+// Only dereferenced after checking it's still the live draw object.
 internal unsafe struct ScaleOverride
 {
     public DrawObject* Target;
     public Vector3 Original;
     public Vector3 LastApplied;
 
-    /// <summary>
-    /// Picks up the draw object's own scale: on first sight, or if something else changed it
-    /// since our last write. Returns true when <see cref="Original"/> was (re)captured.
-    /// </summary>
+    // Re-captures the original when something else changed the scale since our last write.
     public bool Sync(DrawObject* current)
     {
         if (current != Target || !NearlyEqual(current->Scale, LastApplied))
@@ -79,7 +72,6 @@ internal unsafe struct ScaleOverride
         LastApplied = scale;
     }
 
-    /// <summary>Puts the original scale back if <paramref name="current"/> is still the object we changed.</summary>
     public void Restore(DrawObject* current)
     {
         if (Target != null && current == Target && NearlyEqual(current->Scale, LastApplied))
@@ -92,11 +84,7 @@ internal unsafe struct ScaleOverride
     public static bool NearlyEqual(Vector3 a, Vector3 b) => Vector3.DistanceSquared(a, b) < 1e-8f;
 }
 
-/// <summary>
-/// Our lift on the world camera's look-at height. Added on top of whatever value the game or
-/// another plugin (Cammy) set, so it can be undone. The pointer is only compared, never
-/// dereferenced on its own.
-/// </summary>
+// Added on top of what the game or Cammy set, so it can be undone. The pointer is only compared.
 internal unsafe struct CameraOverride
 {
     private float* target;
@@ -110,7 +98,7 @@ internal unsafe struct CameraOverride
         var current = *field;
         if (field != target || MathF.Abs(current - lastWritten) > 1e-5f)
         {
-            // First write, or someone else changed it since our last write: that's the new base.
+            // Someone else changed it since our last write: that's the new base.
             target = field;
             baseValue = current;
         }
@@ -130,28 +118,21 @@ internal unsafe struct CameraOverride
     public void Forget() => target = null;
 }
 
-
-/// <summary>Per-player state, kept while the player is drawn.</summary>
 internal sealed unsafe class PlayerTrack
 {
-    /// <summary>Our compensation on this player's own model while they sit on a scaled mount.</summary>
     public ScaleOverride Self;
 
-    // The skeleton scale is the rendered height, but it also picks up the rider scale we
-    // write (a frame late), so reading it while we're compensating loops. Instead we learn
-    // skeleton-height-per-CalculateHeight while we're not touching the player or their mount,
-    // and use CalculateHeight (which our writes can't affect) times that while they ride.
+    // The skeleton scale picks up our own rider write a frame late, so it's calibrated against
+    // CalculateHeight while untouched, and CalculateHeight is used while riding.
     public int CleanFrames;
-    public DrawObject* CalibratedFor; // only compared
+    public DrawObject* CalibratedFor;
     public float HeightPerCalculate;
 
-    // Right after a redraw the new model can briefly report a default-sized skeleton before
-    // the game applies the real height, so only trust a reading that has held steady.
+    // After a redraw the skeleton briefly reports a default size; wait for a steady reading.
     public float LastReading;
     public int StableFrames;
 }
 
-/// <summary>One other mounted player, for the Debug panel.</summary>
 public struct OtherDebug
 {
     public string Name;
@@ -162,33 +143,25 @@ public struct OtherDebug
     public int StableFrames;
     public bool ModelVisible;
     public byte LoadState;
-    public Vector3 MountSeen;   // mount scale at the start of the frame, before our write
+    public Vector3 MountSeen;
     public Vector3 MountOriginal;
     public Vector3 MountApplied;
-    public int GameResets;     // times the mount's size changed under us since we started on it
+    public int GameResets;
 }
 
-/// <summary>Per-mount state, keyed by the driver, kept while they drive.</summary>
 internal sealed unsafe class MountTrack
 {
     public ScaleOverride Mount;
 
-    // The game sizes a mount once, when it appears: a fixed per-mount size times the
-    // MountCustomize value for the driver's race and gender at that moment. It doesn't follow
-    // later race/gender changes (Glamourer) or height. We remember which value it used so we
-    // can swap it for the current one. SummonDraw is only compared, never dereferenced.
+    // The game sizes a mount once, when it appears, from the driver's race and gender then.
+    // Remember that value so later changes (Glamourer) can be swapped in.
     public DrawObject* SummonDraw;
     public Vector3 SummonScale;
     public float? SummonRaceScale;
 
-    public int GameResets; // debug: Sync re-captures on the same mount object
+    public int GameResets;
 }
 
-/// <summary>
-/// Scales every drawn player's mount (yours, and others' if enabled) by how much the driver's
-/// rendered look and height differ from what the game sized the mount for, and keeps everyone
-/// sitting on it at their true size. Also moves your camera with your own mount.
-/// </summary>
 public sealed unsafe class MountScaling : IDisposable
 {
     private readonly Configuration config;
@@ -196,7 +169,6 @@ public sealed unsafe class MountScaling : IDisposable
     private readonly Dictionary<uint, PlayerTrack> players = new();
     private readonly Dictionary<uint, MountTrack> mounts = new();
 
-    // Reused every frame.
     private readonly Dictionary<uint, nint> visible = new();
     private readonly HashSet<uint> passengerIds = new();
     private readonly List<uint> drivers = new();
@@ -206,7 +178,6 @@ public sealed unsafe class MountScaling : IDisposable
     private const int CleanFramesNeeded = 3;
     private const int StableFramesNeeded = 20; // ~1/3 s at 60 fps
 
-    /// <summary>Set by the config window while its debug section is open, to fill <see cref="Others"/>.</summary>
     public bool CollectDetails;
     public readonly List<OtherDebug> Others = new();
     private readonly Dictionary<uint, string> names = new();
@@ -226,7 +197,6 @@ public sealed unsafe class MountScaling : IDisposable
     public void Dispose()
     {
         Plugin.Framework.Update -= OnUpdate;
-        // Put everything back to normal size if we're unloaded mid-ride.
         Plugin.Framework.RunOnFrameworkThread(RestoreAll).Wait();
     }
 
@@ -263,7 +233,6 @@ public sealed unsafe class MountScaling : IDisposable
             Calibrate(c, track, mountActive);
         }
 
-        // Size each driver's mount; note how much everyone on it must be compensated.
         compensation.Clear();
         float? localFactor = null;
         var others = 0;
@@ -291,7 +260,6 @@ public sealed unsafe class MountScaling : IDisposable
                     Others.Add(new OtherDebug { Name = NameOf(id), Status = compensation.ContainsKey(id) ? "passenger, kept at size" : "passenger" });
         }
 
-        // Riders: keep everyone on a scaled mount at their true size; put everyone else back.
         foreach (var (id, address) in visible)
         {
             var draw = ((Character*)address)->DrawObject;
@@ -313,7 +281,6 @@ public sealed unsafe class MountScaling : IDisposable
             }
         }
 
-        // Mounts whose driver stopped driving (dismounted, became a passenger) or vanished.
         stale.Clear();
         foreach (var (id, track) in mounts)
         {
@@ -327,7 +294,7 @@ public sealed unsafe class MountScaling : IDisposable
         }
         foreach (var id in stale) mounts.Remove(id);
 
-        // Players no longer drawn: their objects may be gone, so just forget them.
+        // Their objects may be gone; just forget them.
         stale.Clear();
         foreach (var (id, track) in players)
         {
@@ -341,7 +308,6 @@ public sealed unsafe class MountScaling : IDisposable
         UpdateCamera(local, localFactor, (float)framework.UpdateDelta.TotalSeconds);
     }
 
-    /// <summary>Every player the game is drawing, by entity id.</summary>
     private void CollectVisible()
     {
         visible.Clear();
@@ -357,7 +323,6 @@ public sealed unsafe class MountScaling : IDisposable
         }
     }
 
-    /// <summary>Players riding their own mount: has a mount object, and isn't in someone else's seats.</summary>
     private void FindDrivers(uint localId)
     {
         passengerIds.Clear();
@@ -385,7 +350,6 @@ public sealed unsafe class MountScaling : IDisposable
         }
     }
 
-    /// <summary>Scales one driver's mount. Returns the factor applied, or null if it isn't being scaled.</summary>
     private float? UpdateMount(uint id, Character* driver, bool isLocal)
     {
         var draw = driver->DrawObject;
@@ -413,16 +377,14 @@ public sealed unsafe class MountScaling : IDisposable
 
         if (!config.Enabled || player.CalibratedFor != draw)
         {
-            // Disabled, or this player's model is new (just appeared, plugin loaded mid-ride,
-            // Penumbra/Glamourer redraw): leave the mount alone until their height has been
-            // measured cleanly.
+            // Wait until a new model's height has been measured cleanly.
             track.Mount.Restore(mountDraw);
             detail.Status = !config.Enabled ? "plugin off" : $"measuring height ({Math.Min(player.StableFrames, StableFramesNeeded)}/{StableFramesNeeded})";
             AddDetail(isLocal, detail);
             return null;
         }
 
-        // Read the rider's own scale before we compensate it, so our write never feeds back in.
+        // Read the rider's own scale before compensating, so our write never feeds back in.
         player.Self.Sync(draw);
         var sameMount = track.Mount.Target == mountDraw;
         if (track.Mount.Sync(mountDraw))
@@ -462,13 +424,11 @@ public sealed unsafe class MountScaling : IDisposable
         return factor;
     }
 
-    // World camera fields, from Cammy's GameCamera layout (not in ClientStructs yet; checked
-    // working with Cammy on this patch 2026-11). 0x240 is the eased copy the game glides toward 0x234.
+    // World camera fields from Cammy's GameCamera layout (not in ClientStructs). 0x240 eases toward 0x234.
     private const int CameraModeOffset = 0x180;            // 0 = first person
     private const int CameraLookAtHeightOffset = 0x234;
     private const int CameraInterpolatedLookAtHeightOffset = 0x240;
 
-    /// <summary>The world camera's look-at height field, or null if there's no camera or it looks wrong.</summary>
     private static float* GetLookAtField(out byte* cam)
     {
         var manager = FFXIVClientStructs.FFXIV.Client.Game.Control.CameraManager.Instance();
@@ -477,7 +437,7 @@ public sealed unsafe class MountScaling : IDisposable
             return null;
 
         var field = (float*)(cam + CameraLookAtHeightOffset);
-        // Layout changed under us after a patch: don't touch it.
+        // Layout changed after a patch: don't touch it.
         return float.IsFinite(*field) && MathF.Abs(*field) < 1000f ? field : null;
     }
 
@@ -491,12 +451,7 @@ public sealed unsafe class MountScaling : IDisposable
             camera.Forget();
     }
 
-    /// <summary>
-    /// Scales the camera's aim height with your own mount: the game aims at your character's
-    /// CameraOffset height (e.g. 1.50 on a vanilla mount), so we add that × (factor − 1) to the
-    /// world camera's look-at height, on top of whatever the game or Cammy set, eased in and out.
-    /// Zoom is left alone, and nothing changes in first person.
-    /// </summary>
+    // Adds CameraOffset.Y x (factor - 1) to the look-at height, eased. Nothing in first person.
     private void UpdateCamera(Character* player, float? factor, float dt)
     {
         var field = GetLookAtField(out var cam);
@@ -507,7 +462,6 @@ public sealed unsafe class MountScaling : IDisposable
         if (config.MoveCamera && field != null && !firstPerson && factor is { } f && IsSane(f) && float.IsFinite(aimHeight))
             desired = aimHeight * (f - 1f);
 
-        // Glide: close ~95% of the gap in about a third of a second (the game eases on top).
         var k = 1f - MathF.Exp(-Math.Max(dt, 0f) / CameraEaseSeconds);
         cameraLift += (desired - cameraLift) * k;
         if (desired == 0f && MathF.Abs(cameraLift) < 0.001f)
@@ -535,11 +489,7 @@ public sealed unsafe class MountScaling : IDisposable
         Debug.InterpolatedLookAtHeight = *(float*)(cam + CameraInterpolatedLookAtHeightOffset);
     }
 
-    /// <summary>
-    /// Records the race/gender size the game just used for this mount. Not on our own
-    /// restore/re-capture of the same mount (same object, same scale): the driver may have
-    /// changed look since it was summoned.
-    /// </summary>
+    // Not on our own restore of the same mount: the driver may have changed look since it appeared.
     private static void RememberSummon(MountTrack track, Character* driver, DrawObject* mountDraw, Vector3 scale)
     {
         if (mountDraw == track.SummonDraw && ScaleOverride.NearlyEqual(scale, track.SummonScale))
@@ -554,17 +504,11 @@ public sealed unsafe class MountScaling : IDisposable
     // No size limits; ReadHeightRatio only rejects garbage reads.
     private float ComputeFactor(float ratio) => 1f + config.Strength * (ratio - 1f);
 
-    /// <summary>
-    /// How much bigger the mount should be than the game made it:
-    /// (race/gender size for how the driver looks now ÷ the one the game used when it appeared)
-    /// × (their rendered height ÷ an average, 50%-slider member of their current clan and gender).
-    /// </summary>
+    // (race size for the current look / the one used at summon) x (height / 50%-slider clan average)
     private float? ReadHeightRatio(Character* driver, PlayerTrack player, MountTrack track, Vector3 riderScale, bool isLocal)
     {
         var customize = GetLook(driver, out var fromModel);
 
-        // Rendered height in racial-scaling-table units (checked in game: 1.42 with a 1.42 mod,
-        // 1.24 vanilla), from CalculateHeight and the calibration taken while unmounted.
         var calculate = driver->ModelContainer.CalculateHeight();
         var height = calculate * player.HeightPerCalculate;
         var model = riderScale.Y;
@@ -611,10 +555,6 @@ public sealed unsafe class MountScaling : IDisposable
         return ratio;
     }
 
-    /// <summary>
-    /// While we aren't touching this player or their mount, learn how their skeleton's scale
-    /// (the rendered height, times the draw object scale) relates to CalculateHeight.
-    /// </summary>
     private static void Calibrate(Character* c, PlayerTrack track, bool mountActive)
     {
         var draw = c->DrawObject;
@@ -629,8 +569,7 @@ public sealed unsafe class MountScaling : IDisposable
         if (++track.CleanFrames < CleanFramesNeeded)
             return;
 
-        // A model that's still loading after a redraw isn't shown yet and can report a
-        // default-sized skeleton; wait until it's visible.
+        // A model still loading after a redraw can report a default-sized skeleton.
         if (!draw->IsVisible)
         {
             track.StableFrames = 0;
@@ -653,7 +592,6 @@ public sealed unsafe class MountScaling : IDisposable
             track.StableFrames = 0;
         track.LastReading = reading;
 
-        // Keep refining while untouched, but only start scaling on a steady reading.
         if (track.StableFrames < StableFramesNeeded)
             return;
 
@@ -676,11 +614,7 @@ public sealed unsafe class MountScaling : IDisposable
         return track;
     }
 
-    /// <summary>
-    /// Race, clan, gender and height as rendered. Glamourer changes the rendered model's copy
-    /// and leaves the character's own data alone, and the game sizes mounts from the
-    /// rendered one, so prefer it.
-    /// </summary>
+    // Prefer the rendered model's look: Glamourer changes that copy, and mounts are sized from it.
     private static CustomizeData GetLook(Character* c, out bool fromModel)
     {
         var draw = c->DrawObject;
@@ -725,7 +659,6 @@ public sealed unsafe class MountScaling : IDisposable
         return player == null ? null : (Character*)player.Address;
     }
 
-    /// <summary>The draw object of the mount this character owns, or null.</summary>
     private static DrawObject* GetMountDrawObject(Character* c)
     {
         var mountObject = c->Mount.MountObject;
@@ -734,6 +667,6 @@ public sealed unsafe class MountScaling : IDisposable
         return mountObject->DrawObject;
     }
 
-    // Only rejects garbage reads (zero, negative, NaN, absurd); giant characters (height 20+) are fine.
+    // Only rejects garbage reads; giant characters are fine.
     private static bool IsSane(float v) => float.IsFinite(v) && v is > 0.001f and < 10000f;
 }
